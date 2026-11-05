@@ -1,6 +1,14 @@
-# Continuous Linux portable build of this fork, published as the `continuous` release.
-# Consumers download the asset renode-continuous.linux-portable.tar.gz: one top-level
-# directory with the `renode` executable inside, like upstream's linux-portable archive.
+# Continuous portable builds of this fork, published as the `continuous` prerelease.
+#
+# Assets (fixed names, replaced on every successful build of that platform):
+#   renode-continuous.linux-portable.tar.gz    Linux x86_64; one top-level directory with `renode`
+#   renode-continuous.osx-arm64-portable.dmg   macOS Apple silicon, unsigned app bundle
+#   renode-continuous.windows-portable.zip     Windows x64; one top-level directory with `renode.exe`
+#   renode-continuous.setup.exe                Windows x64 installer
+# each with a .sha256 beside it. A platform whose build fails keeps its previous asset; the
+# release notes name the platforms rebuilt by the latest run.
+#
+# Prerequisites follow Renode's "Building from source" documentation for each platform.
 name: Continuous build
 
 on:
@@ -16,15 +24,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  linux-portable:
+  linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 8.0.x
 
@@ -33,19 +41,131 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends automake autoconf libtool cmake g++
 
-      - name: Build the Linux portable package
+      - name: Build the portable package
         run: ./build.sh -t -n
+
+      - name: Stage the asset
+        run: |
+          mkdir -p dist
+          cp output/packages/renode-*.linux-portable.tar.gz dist/renode-continuous.linux-portable.tar.gz
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: linux
+          path: dist/
+          retention-days: 3
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install build dependencies
+        run: brew install binutils gnu-sed coreutils dialog cmake
+
+      - name: Build the portable package
+        run: ./build.sh -t -n
+
+      - name: Stage the asset
+        run: |
+          mkdir -p dist
+          cp output/packages/renode-*.osx-arm64-portable.dmg dist/renode-continuous.osx-arm64-portable.dmg
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: macos
+          path: dist/
+          retention-days: 3
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Configure Git for the shell scripts
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.symlinks true
+          git config --global core.longpaths true
+
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install MinGW-w64 15.1.0
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/mingw.7z" \
+            https://github.com/niXman/mingw-builds-binaries/releases/download/15.1.0-rt_v12-rev0/x86_64-15.1.0-release-win32-seh-msvcrt-rt_v12-rev0.7z
+          7z x -y -o"C:/mingw-w64" "$RUNNER_TEMP/mingw.7z" > /dev/null
+          echo 'C:\mingw-w64\mingw64\bin' >> "$GITHUB_PATH"
+
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup --no-progress -y
+          echo 'C:\Program Files (x86)\Inno Setup 6' >> "$GITHUB_PATH"
+
+      - name: Build the portable package and installer
+        run: ./build.sh -t -n
+
+      - name: Stage the assets
+        run: |
+          mkdir -p dist
+          cp output/packages/renode-*.windows-portable.zip dist/renode-continuous.windows-portable.zip
+          installer=$(find . -path ./dist -prune -o -name 'renode-*.setup.exe' -print | head -n 1)
+          if [ -n "$installer" ]; then
+            cp "$installer" dist/renode-continuous.setup.exe
+          else
+            echo "::warning::No installer was built"
+          fi
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: windows
+          path: dist/
+          retention-days: 3
+
+  publish:
+    needs: [linux, macos, windows]
+    if: ${{ !cancelled() && (needs.linux.result == 'success' || needs.macos.result == 'success' || needs.windows.result == 'success') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Publish the continuous release
         env:
           GH_TOKEN: ${{ github.token }}
+          LINUX: ${{ needs.linux.result }}
+          MACOS: ${{ needs.macos.result }}
+          WINDOWS: ${{ needs.windows.result }}
         run: |
           set -euo pipefail
-          package=$(ls output/packages/renode-*.linux-portable.tar.gz | head -n 1)
-          asset=renode-continuous.linux-portable.tar.gz
-          cp "$package" "$asset"
-          sha256sum "$asset" > "$asset.sha256"
-          notes="Linux x86_64 portable build of ${GITHUB_REF_NAME} at ${GITHUB_SHA} ($(basename "$package"))."
+          cd dist
+          for f in *; do sha256sum "$f" > "$f.sha256"; done
+          ls -l
+          notes="Portable builds of ${GITHUB_REF_NAME} at ${GITHUB_SHA}.
+
+          Rebuilt by this run: Linux ${LINUX}, macOS ${MACOS}, Windows ${WINDOWS}. A platform that did not succeed keeps its asset from an earlier run."
           git tag -f continuous "$GITHUB_SHA"
           git push --force origin refs/tags/continuous
           if gh release view continuous > /dev/null 2>&1; then
@@ -53,4 +173,4 @@ jobs:
           else
             gh release create continuous --prerelease --verify-tag --title "Continuous build" --notes "$notes"
           fi
-          gh release upload continuous "$asset" "$asset.sha256" --clobber
+          gh release upload continuous ./* --clobber
