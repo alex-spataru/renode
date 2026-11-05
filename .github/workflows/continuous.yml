@@ -1,0 +1,56 @@
+# Continuous Linux portable build of this fork, published as the `continuous` release.
+# Consumers download the asset renode-continuous.linux-portable.tar.gz: one top-level
+# directory with the `renode` executable inside, like upstream's linux-portable archive.
+name: Continuous build
+
+on:
+  push:
+    branches: [apu-daq-fixes]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: continuous
+  cancel-in-progress: true
+
+jobs:
+  linux-portable:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends automake autoconf libtool cmake g++
+
+      - name: Build the Linux portable package
+        run: ./build.sh -t -n
+
+      - name: Publish the continuous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          package=$(ls output/packages/renode-*.linux-portable.tar.gz | head -n 1)
+          asset=renode-continuous.linux-portable.tar.gz
+          cp "$package" "$asset"
+          sha256sum "$asset" > "$asset.sha256"
+          notes="Linux x86_64 portable build of ${GITHUB_REF_NAME} at ${GITHUB_SHA} ($(basename "$package"))."
+          git tag -f continuous "$GITHUB_SHA"
+          git push --force origin refs/tags/continuous
+          if gh release view continuous > /dev/null 2>&1; then
+            gh release edit continuous --prerelease --notes "$notes"
+          else
+            gh release create continuous --prerelease --verify-tag --title "Continuous build" --notes "$notes"
+          fi
+          gh release upload continuous "$asset" "$asset.sha256" --clobber
