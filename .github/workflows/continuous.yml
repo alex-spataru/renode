@@ -120,6 +120,15 @@ jobs:
           choco install innosetup --no-progress -y
           echo 'C:\Program Files (x86)\Inno Setup 6' >> "$GITHUB_PATH"
 
+      # The packaging script copies this symlink with `cp -r`, and Git Bash cannot recreate a
+      # symlink whose relative target does not exist at the destination. The script replaces
+      # the link right after copying it, so a real copy of its target is equivalent.
+      - name: Replace the SystemC socket-cpp symlink with a copy
+        run: |
+          link=src/Plugins/SystemCPlugin/SystemCModule/lib/socket-cpp
+          rm -rf "$link"
+          cp -r src/Plugins/CoSimulationPlugin/IntegrationLibrary/libs/socket-cpp "$link"
+
       - name: Build the portable package and installer
         run: ./build.sh -t -n
 
